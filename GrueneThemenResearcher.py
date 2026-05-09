@@ -16,6 +16,45 @@ from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
 from urllib.request import urlretrieve
 from textwrap import wrap
 
+APP_VERSION_MAJOR = 0
+APP_VERSION_MINOR = 1
+APP_VERSION_PATCH_BASE = 0
+APP_VERSION_FALLBACK = f"{APP_VERSION_MAJOR}.{APP_VERSION_MINOR}.{APP_VERSION_PATCH_BASE}"
+LOG_FILE_NAME = "error.log"
+
+
+def get_app_version():
+    try:
+        base_path = Path(__file__).resolve().parent
+        if not (base_path / ".git").exists():
+            return APP_VERSION_FALLBACK
+
+        commit_count = subprocess.check_output(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=base_path,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        patch = APP_VERSION_PATCH_BASE + int(commit_count)
+        return f"{APP_VERSION_MAJOR}.{APP_VERSION_MINOR}.{patch}"
+    except Exception:
+        return APP_VERSION_FALLBACK
+
+
+def get_log_file_path():
+    return Path(__file__).resolve().parent / LOG_FILE_NAME
+
+
+def log_to_file(message, level="INFO"):
+    try:
+        log_path = get_log_file_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"[{timestamp}] [{level}] {message}\n")
+    except Exception:
+        pass
+
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
@@ -66,6 +105,7 @@ try:
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import (
         QApplication,
+        QCheckBox,
         QFormLayout,
         QLabel,
         QLineEdit,
@@ -81,6 +121,7 @@ except ImportError:
     from PyQt5.QtGui import QIcon
     from PyQt5.QtWidgets import (
         QApplication,
+        QCheckBox,
         QFormLayout,
         QLabel,
         QLineEdit,
@@ -93,7 +134,7 @@ except ImportError:
     )
 
 
-def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status_callback=None):
+def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status_callback=None, generate_images=True):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -335,6 +376,26 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
 
         return sections
 
+    def build_table_of_contents(sections, toc_pages=None):
+        headings = []
+        for section in sections:
+            heading = str(section.get("heading", "")).strip()
+            if not heading:
+                continue
+            if heading.lower() == "inhaltsverzeichnis":
+                continue
+            headings.append(heading)
+
+        if not headings:
+            return None
+
+        body = []
+        for idx, heading in enumerate(headings, start=1):
+            page = toc_pages.get(heading, "?") if toc_pages else ""
+            body.append(f"{idx}. {heading} ... Seite {page}")
+
+        return {"heading": "Inhaltsverzeichnis", "body": body, "image_signal": None}
+
     def download_image(image_url):
         def sanitize_image_url(raw_url):
             if not raw_url:
@@ -494,11 +555,6 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
                 pdf.drawString(box_x + 12, current_y, desc_line)
                 current_y -= 12
 
-        if caption:
-            pdf.setFillColor(colors.HexColor("#546E7A"))
-            pdf.setFont("Helvetica-Oblique", 8.2)
-            pdf.drawString(box_x, box_y - 9, f"Bildimpuls: {simplify_markdown_inline(caption)[:105]}")
-
     _placeholder_status = ["Nano Banana nicht verfuegbar"]
 
     def get_nanobanana_api_key():
@@ -508,88 +564,101 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
             or api_key
         )
 
-    def generate_image_with_nanobanana(prompt_text):
-        nanobanana_api_key = get_nanobanana_api_key()
+    def generate_image_with_nanobanana(prompt_text, generate_images=True):
+        if not generate_images:
+            return generate_local_theme_image(prompt_text)
 
+        nanobanana_api_key = get_nanobanana_api_key()
         if not nanobanana_api_key or genai is None:
             _placeholder_status[0] = "Nano Banana: kein API-Key oder Bibliothek fehlt"
-            return None
+            return generate_local_theme_image(prompt_text)
 
-        model_name = os.getenv("NANO_BANANA_MODEL", "imagen-3.0-generate-002")
+        model_candidates = [
+            "imagen-4.0-generate-001",
+            "imagen-4.0-fast-generate-001",
+            "imagen-4.0-ultra-generate-001",
+        ]
         safe_prompt = (
             f"Realistic modern press photo for Gruene Markdorf und Umland: {prompt_text}. "
             "Daylight, authentic, local politics or nature, no logos, no text in image."
         )
 
-        try:
-            client = genai.Client(api_key=nanobanana_api_key)
-            if status_callback:
-                status_callback(f"Generiere Bild: {prompt_text[:60]}...")
+        client = genai.Client(api_key=nanobanana_api_key)
+        if status_callback:
+            status_callback(f"Generiere Bild: {prompt_text[:60]}...")
 
-            config = None
-            if genai_types is not None and hasattr(genai_types, "GenerateImagesConfig"):
-                config = genai_types.GenerateImagesConfig(
-                    number_of_images=1,
-                    output_mime_type="image/jpeg",
-                    aspect_ratio="16:9"
-                )
+        last_error = None
+        for model_name in model_candidates:
+            if not model_name:
+                continue
+            try:
+                config = None
+                if genai_types is not None and hasattr(genai_types, "GenerateImagesConfig"):
+                    config = genai_types.GenerateImagesConfig(
+                        number_of_images=1,
+                        output_mime_type="image/jpeg",
+                        aspect_ratio="16:9"
+                    )
 
-            if config is not None:
-                result = client.models.generate_images(
-                    model=model_name,
-                    prompt=safe_prompt,
-                    config=config
-                )
-            else:
-                result = client.models.generate_images(
-                    model=model_name,
-                    prompt=safe_prompt
-                )
+                if config is not None:
+                    result = client.models.generate_images(
+                        model=model_name,
+                        prompt=safe_prompt,
+                        config=config
+                    )
+                else:
+                    result = client.models.generate_images(
+                        model=model_name,
+                        prompt=safe_prompt
+                    )
 
-            # Extract image from GenerateImagesResponse
-            for generated_image in getattr(result, "images", getattr(result, "generated_images", [])):
-                if hasattr(generated_image, "image"): # Old vertex format
-                    image_bytes = getattr(generated_image.image, "image_bytes", None)
-                else: # New structure where it's a list of `Image` directly
-                    image_bytes = getattr(generated_image, "image_bytes", None)
+                # Extract image from GenerateImagesResponse
+                for generated_image in getattr(result, "images", getattr(result, "generated_images", [])):
+                    if hasattr(generated_image, "image"): # Old vertex format
+                        image_bytes = getattr(generated_image.image, "image_bytes", None)
+                    else: # New structure where it's a list of `Image` directly
+                        image_bytes = getattr(generated_image, "image_bytes", None)
                     
-                if not image_bytes:
-                    continue
+                    if not image_bytes:
+                        continue
 
-                if isinstance(image_bytes, str):
-                    image_bytes = base64.b64decode(image_bytes)
+                    if isinstance(image_bytes, str):
+                        image_bytes = base64.b64decode(image_bytes)
 
-                target_path = Path(tempfile.gettempdir()) / (
-                    f"gruene_layout_nanobanana_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
-                )
+                    target_path = Path(tempfile.gettempdir()) / (
+                        f"gruene_layout_nanobanana_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+                    )
 
-                # Normalize to RGB PNG to avoid ReportLab issues with unusual JPEG/WebP formats.
-                normalized = False
-                if Image is not None:
-                    try:
-                        with Image.open(io.BytesIO(image_bytes)) as pil_img:
-                            if pil_img.mode not in ("RGB", "RGBA"):
-                                pil_img = pil_img.convert("RGB")
-                            pil_img.save(target_path, format="PNG", optimize=True)
-                            normalized = True
-                    except Exception:
-                        normalized = False
+                    # Normalize to RGB PNG to avoid ReportLab issues with unusual JPEG/WebP formats.
+                    normalized = False
+                    if Image is not None:
+                        try:
+                            with Image.open(io.BytesIO(image_bytes)) as pil_img:
+                                if pil_img.mode not in ("RGB", "RGBA"):
+                                    pil_img = pil_img.convert("RGB")
+                                pil_img.save(target_path, format="PNG", optimize=True)
+                                normalized = True
+                        except Exception:
+                            normalized = False
 
-                if not normalized:
-                    target_path.write_bytes(image_bytes)
+                    if not normalized:
+                        target_path.write_bytes(image_bytes)
 
-                temp_image_paths.append(target_path)
-                _placeholder_status[0] = "Bild erfolgreich generiert"
-                return target_path
+                    temp_image_paths.append(target_path)
+                    _placeholder_status[0] = "Bild erfolgreich generiert"
+                    return target_path
 
-            _placeholder_status[0] = "Nano Banana: kein Bild in Antwort enthalten"
-        except Exception as exc:
-            short_err = str(exc)[:120]
-            _placeholder_status[0] = f"Fehler: {short_err}"
-            if status_callback:
-                status_callback(f"Bildfehler: {short_err[:80]}")
+                last_error = "Keine Bilddaten in der Antwort enthalten"
+            except Exception as exc:
+                short_err = str(exc)[:240]
+                last_error = short_err
+                log_to_file(f"Bildgenerierung mit Model {model_name} fehlgeschlagen: {short_err}", "ERROR")
+                continue
 
-        return None
+        _placeholder_status[0] = f"Nano Banana: kein Modell verfügbar ({last_error})"
+        if status_callback:
+            status_callback("Bild aktuell nicht verfügbar, ersetze durch lokalen Platzhalter.")
+        return generate_local_theme_image(prompt_text)
 
     def infer_image_prompt(section):
         heading = section.get("heading", "Kommunalpolitik in Markdorf")
@@ -615,7 +684,7 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
     local_images = find_local_layout_images()
     local_image_index = 0
 
-    def resolve_image_for_section(section, index):
+    def resolve_image_for_section(section, index, generate_images=True):
         nonlocal local_image_index
         signal = section.get("image_signal")
         hint_text = infer_image_prompt(section)
@@ -633,17 +702,17 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
                 image_path = download_image(signal_value)
                 if image_path:
                     return image_path, signal_value
-                return generate_image_with_nanobanana(signal_value), signal_value
+                return generate_image_with_nanobanana(signal_value, generate_images), signal_value
 
             if signal_type == "hint":
                 if local_images:
                     image_path = local_images[local_image_index % len(local_images)]
                     local_image_index += 1
                     return image_path, signal_value
-                return generate_image_with_nanobanana(signal_value), signal_value
+                return generate_image_with_nanobanana(signal_value, generate_images), signal_value
 
             if signal_type == "prompt":
-                return generate_image_with_nanobanana(signal_value), signal_value
+                return generate_image_with_nanobanana(signal_value, generate_images), signal_value
 
         wants_image = (
             index == 0
@@ -658,7 +727,7 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
             local_image_index += 1
             return image_path, hint_text
 
-        return generate_image_with_nanobanana(hint_text), hint_text
+        return generate_image_with_nanobanana(hint_text, generate_images), hint_text
 
     def draw_page_chrome(current_page):
         pdf.setFillColor(colors.HexColor("#F3FAF4"))
@@ -704,6 +773,23 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
             y = next_page()
 
     sections = parse_layout_sections(report_text)
+    toc_pages = {}
+    current_page_for_toc = 2  # TOC on page 1, first chapter on page 2
+
+    # First pass to collect page numbers
+    for idx, section in enumerate(sections):
+        heading = section.get("heading") or f"Abschnitt {idx + 1}"
+        if heading.lower() == "inhaltsverzeichnis":
+            continue
+        toc_pages[heading] = current_page_for_toc
+        if "kapitel" in heading.lower():
+            current_page_for_toc += 1
+
+    if sections and sections[0].get("heading", "").strip().lower() != "inhaltsverzeichnis":
+        toc_section = build_table_of_contents(sections, toc_pages)
+        if toc_section:
+            sections.insert(0, toc_section)
+
     open_new_page()
 
     pdf.setFillColor(colors.HexColor("#E8F5E9"))
@@ -727,7 +813,7 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
                 continue
             wrapped_lines.extend(wrap(paragraph.strip(), width=94))
 
-        image_path, image_caption = resolve_image_for_section(section, idx)
+        image_path, image_caption = resolve_image_for_section(section, idx, generate_images)
         has_signal = section.get("image_signal") is not None
         heading_lower_img = str(section.get("heading", "")).lower()
         is_messenger_section = heading_lower_img in {"messenger"}
@@ -760,7 +846,11 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
 
         text_y = card_y + card_height - 18
         pdf.setFillColor(colors.HexColor("#1B5E20"))
-        pdf.setFont("Helvetica-Bold", 13)
+        if "kapitel" in heading.lower():
+            pdf.setFont("Helvetica-Bold", 16)
+            pdf.bookmarkPage(heading)
+        else:
+            pdf.setFont("Helvetica-Bold", 13)
         pdf.drawString(card_x + 22, text_y, heading[:78])
         text_y -= 18
 
@@ -801,6 +891,10 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
 
         y = card_y - 14
 
+        # New page for chapters
+        if "kapitel" in heading.lower():
+            y = next_page()
+
     pdf.save()
 
     for temp_path in temp_image_paths:
@@ -820,7 +914,7 @@ def build_markdorf_pr_crew(api_key):
 
     researcher = Agent(
         role="Lokal-Researcher Markdorf und Umland",
-        goal="Finde 3 aktuelle, brisante politische Themen in Markdorf und Umland.",
+        goal="Finde ein klar abgegrenztes Set aus 3 aktuellen, brisanten politischen Themen in Markdorf und Umland.",
         backstory="""Du bist der Infopool des Ortsverbands. Du scannst Lokalnachrichten,
     Gemeinderatsprotokolle und regionale Mitteilungen. Dein Fokus liegt auf absoluter
     Aktualität und lokaler Relevanz für grüne Kernthemen.""",
@@ -870,38 +964,41 @@ def build_markdorf_pr_crew(api_key):
     )
 
     task_research = Task(
-        description="Recherchiere 3 aktuelle kommunalpolitische Themen in Markdorf und Umland (Woche: Mai 2026).",
-        expected_output="Eine Liste mit 3 News-Themen inkl. Quellenangabe oder kurzer Zusammenfassung.",
+        description="Recherchiere 3 aktuelle kommunalpolitische Themen in Markdorf und Umland (Woche: Mai 2026). Stelle sicher, dass jedes Thema klar voneinander abgrenzbar und lokal relevant ist.",
+        expected_output="Eine Liste mit 3 News-Themen inkl. Quellenangabe oder kurzer Zusammenfassung, getrennt nach Thema.",
         agent=researcher,
     )
 
     task_background = Task(
-        description="Wähle das relevanteste Thema aus und ergänze es um grüne Hintergründe und Argumente.",
-        expected_output="Ein inhaltliches Briefing mit Fakten-Check und Bezug zum grünen Programm.",
+        description="Vertiefe jedes der 3 recherchierten Themen und ergänze sie um grüne Hintergründe, Argumente und klare Relevanz für Markdorf und Umland.",
+        expected_output="Ein inhaltliches Briefing zu den 3 Themen mit Fakten-Check, grünem Bezug und jeweils einem kurzen Fokusargument.",
         agent=expert,
         context=[task_research],
     )
 
     task_creation = Task(
-        description="""Erstelle auf Basis des Briefings vier getrennte Entwürfe:
-    1. einen Instagram-Post,
-    2. einen Facebook-Beitrag,
-    3. einen kurzen Website-Artikel,
-    4. eine kurze Messenger-Nachricht für Broadcast oder Gruppenversand.
+        description="""Erstelle auf Basis des Briefings zu den 3 Themen für jedes Thema je einen Instagram-, Facebook-, Website- und Messenger-Beitrag.
+    Gliedere die Ausgabe in Kapitel: THEMA 1, THEMA 2, THEMA 3.
     Passe Ton, Länge und Call-to-Action an den jeweiligen Kanal an.""",
         expected_output="""Format:
     ---
-    INSTAGRAM:
-    [Text inkl. Hashtags und Bildidee]
+    THEMA 1:
+    INSTAGRAM: [Text inkl. Hashtags und Bildidee]
+    FACEBOOK: [Text inkl. Call-to-Action]
+    WEBSEITE: [Kurzartikel mit Überschrift, Teaser und Haupttext]
+    MESSENGER: [Kurznachricht für Broadcast oder Gruppe]
 
-    FACEBOOK:
-    [Text inkl. Call-to-Action]
+    THEMA 2:
+    INSTAGRAM: ...
+    FACEBOOK: ...
+    WEBSEITE: ...
+    MESSENGER: ...
 
-    WEBSEITE:
-    [Kurzartikel mit Überschrift, Teaser und Haupttext]
-
-    MESSENGER:
-    [Kurznachricht für Broadcast oder Gruppe]
+    THEMA 3:
+    INSTAGRAM: ...
+    FACEBOOK: ...
+    WEBSEITE: ...
+    MESSENGER: ...
     ---""",
         agent=social_media,
         context=[task_background],
@@ -934,10 +1031,9 @@ def build_markdorf_pr_crew(api_key):
 
     task_layout = Task(
         description="""Layoutiere den finalen Report fuer den PDF-Export in einem modernen Stil passend zu Gruene Markdorf.
-    Erzeuge den finalen Report als kanalgetrennte Endfassung mit vier verpflichtenden Sektionen:
-    INSTAGRAM, FACEBOOK, WEBSEITE und MESSENGER.
-    Schreibe pro Kanal einen fertigen, veroeffentlichungsreifen Beitrag und passe Ton, Laenge,
-    Struktur und Call-to-Action an den Kanal an.
+    Erzeuge den finalen Report mit Inhaltsverzeichnis und drei Kapiteln, eines pro Thema.
+    Jedes Kapitel soll das Thema beschreiben, den grünen Hintergrund erklären und die vier Kanal-Posts enthalten.
+    Erstelle pro Kapitel je einen Instagram-, Facebook-, Website- und Messenger-Text.
     Fuege dort, wo es sinnvoll ist, passende Bildhinweise ein (lokaler Bezug, Mobilitaet, Klima,
     Energie, Natur, Buergerdialog). Wenn moeglich, gib konkrete Bild-URLs an, sonst einen praezisen
     Bild-Hinweis oder einen Bild-Prompt zur direkten Nano-Banana-Generierung.
@@ -948,20 +1044,23 @@ def build_markdorf_pr_crew(api_key):
     TITEL: [Titel des finalen Reports]
     UNTERTITEL: [Untertitel mit lokalem Bezug]
 
-    UEBERSCHRIFT: INSTAGRAM
-    [Finaler, postingfertiger Instagram-Text mit Hashtags]
-    BILD_URL oder BILD_HINWEIS oder BILD_PROMPT: [genau ein Bild-Block]
+    INHALTSVERZEICHNIS:
+    1. Thema 1
+    2. Thema 2
+    3. Thema 3
 
-    UEBERSCHRIFT: FACEBOOK
-    [Finaler, postingfertiger Facebook-Text mit Call-to-Action]
-    BILD_URL oder BILD_HINWEIS oder BILD_PROMPT: [genau ein Bild-Block]
+    KAPITEL 1: THEMA 1
+    [Kurze Einleitung zum Thema]
+    INSTAGRAM: [Text inkl. Hashtags und Bildidee]
+    FACEBOOK: [Text inkl. Call-to-Action]
+    WEBSEITE: [Kurzartikel mit Ueberschrift, Teaser und Haupttext]
+    MESSENGER: [Kurznachricht fuer Broadcast oder Gruppe]
 
-    UEBERSCHRIFT: WEBSEITE
-    [Finaler Website-Beitrag mit Ueberschrift, Teaser und Haupttext]
-    BILD_URL oder BILD_HINWEIS oder BILD_PROMPT: [genau ein Bild-Block]
+    KAPITEL 2: THEMA 2
+    ...
 
-    UEBERSCHRIFT: MESSENGER
-    [Finale, kurze Messenger-Nachricht fuer Broadcast/Gruppe]
+    KAPITEL 3: THEMA 3
+    ...
     ---""",
         agent=layouter,
         context=[task_compliance],
@@ -983,28 +1082,35 @@ def refine_report_with_gemini_designer(raw_report, api_key):
     source_text = str(raw_report)
 
     prompt = f"""Du bist ein Premium-Redaktionsdesigner wie im Gemini-Webinterface.
-Erstelle aus dem folgenden Roh-Report eine druckreife, kanalgetrennte Endfassung fuer ein modernes PDF.
+Erstelle aus dem folgenden Roh-Report eine druckreife Endfassung fuer ein modernes PDF.
 
 Wichtige Regeln:
 - Gib nur den finalen Inhalt aus, keine Erklaerungen.
 - Liefere exakt diese Struktur:
   TITEL: ...
   UNTERTITEL: ...
-  UEBERSCHRIFT: INSTAGRAM
+  INHALTSVERZEICHNIS:
+  1. Thema 1
+  2. Thema 2
+  3. Thema 3
+
+  KAPITEL 1: THEMA 1
+  [Kurze Einleitung zum Thema]
+  INSTAGRAM: ...
+  FACEBOOK: ...
+  WEBSEITE: ...
+  MESSENGER: ...
+
+  KAPITEL 2: THEMA 2
   ...
-  BILD_PROMPT: ...
-  UEBERSCHRIFT: FACEBOOK
+
+  KAPITEL 3: THEMA 3
   ...
-  BILD_PROMPT: ...
-  UEBERSCHRIFT: WEBSEITE
-  ...
-  BILD_PROMPT: ...
-  UEBERSCHRIFT: MESSENGER
-  ...
-- Genau ein Bildblock bei INSTAGRAM, FACEBOOK und WEBSEITE (BILD_URL oder BILD_HINWEIS oder BILD_PROMPT).
+- Genau ein Bildblock bei INSTAGRAM, FACEBOOK und WEBSEITE pro Kapitel (BILD_URL oder BILD_HINWEIS oder BILD_PROMPT).
 - Fuer MESSENGER kein Bildblock.
 - Schreibe ohne Markdown-Codeblock-Markierungen.
 - Schreibe in deutscher Sprache.
+- Nenne drei klare, unterscheidbare Kapitel fuer die drei Themen.
 
 Roh-Report:
 {source_text}
@@ -1036,27 +1142,33 @@ Roh-Report:
     return str(raw_report)
 
 
-def run_research(api_key, status_callback=None):
+def run_research(api_key, status_callback=None, generate_images=True):
     if not api_key or not api_key.strip():
+        log_to_file("Fehler: API-Key fehlt bei Aufruf von run_research.", "ERROR")
         raise ValueError("Bitte gib einen API-Key ein.")
 
     clean_api_key = api_key.strip()
+    log_to_file("Starte run_research.", "INFO")
 
     if status_callback:
         status_callback("Initialisiere Agenten...")
+    log_to_file("Initialisiere Agenten...", "INFO")
     crew = build_markdorf_pr_crew(clean_api_key)
 
     if status_callback:
         status_callback("Recherche läuft...")
+    log_to_file("Recherche läuft...", "INFO")
     result = crew.kickoff()
 
     if status_callback:
         status_callback("Veredle Report mit Gemini Designer...")
+    log_to_file("Veredle Report mit Gemini Designer...", "INFO")
     final_report = refine_report_with_gemini_designer(result, clean_api_key)
 
     if status_callback:
         status_callback("Erstelle PDF-Report...")
-    pdf_path = export_report_to_pdf(final_report, api_key=clean_api_key, status_callback=status_callback)
+    log_to_file("Erstelle PDF-Report...", "INFO")
+    pdf_path = export_report_to_pdf(final_report, api_key=clean_api_key, status_callback=status_callback, generate_images=generate_images)
 
     try:
         if os.name == "nt":
@@ -1087,9 +1199,10 @@ class ResearchWorker(QObject):
     error_occurred = Signal(str)
     finished = Signal()
 
-    def __init__(self, api_key):
+    def __init__(self, api_key, generate_images=True):
         super().__init__()
         self.api_key = api_key
+        self.generate_images = generate_images
         self._last_agent_status = ""
 
     def _status_from_log_line(self, line):
@@ -1138,10 +1251,12 @@ class ResearchWorker(QObject):
             stdout_tee = _LogTee(sys.stdout, self._handle_runtime_log_line)
             stderr_tee = _LogTee(sys.stderr, self._handle_runtime_log_line)
             with contextlib.redirect_stdout(stdout_tee), contextlib.redirect_stderr(stderr_tee):
-                result, pdf_path = run_research(self.api_key, self.status_changed.emit)
+                result, pdf_path = run_research(self.api_key, self.status_changed.emit, self.generate_images)
             self.result_ready.emit(result, pdf_path)
         except Exception as exc:
-            self.error_occurred.emit(f"{exc}\n\n{traceback.format_exc()}")
+            error_text = f"{exc}\n\n{traceback.format_exc()}"
+            log_to_file(error_text, "ERROR")
+            self.error_occurred.emit(error_text)
         finally:
             self.agent_changed.emit("Aktiver Agent: -")
             self.finished.emit()
@@ -1150,7 +1265,7 @@ class ResearchWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Gruene Themen Researcher - Ortsverband Markdorf und Umland")
+        self.setWindowTitle(f"Gruene Themen Researcher - Ortsverband Markdorf und Umland v{get_app_version()}")
         icon_path = get_app_icon_path()
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -1175,11 +1290,19 @@ class MainWindow(QMainWindow):
         self.api_key_help.setOpenExternalLinks(True)
         form_layout.addRow("Info:", self.api_key_help)
 
+        self.version_label = QLabel(f"Version: v{get_app_version()}")
+        form_layout.addRow("Version:", self.version_label)
+
         self.status_label = QLabel("Bereit")
         form_layout.addRow("Status:", self.status_label)
 
         self.active_agent_label = QLabel("Aktiver Agent: -")
         form_layout.addRow("Agent:", self.active_agent_label)
+
+        self.generate_images_checkbox = QCheckBox("Bilder generieren")
+        self.generate_images_checkbox.setChecked(True)
+        self.generate_images_checkbox.setToolTip("Ohne Bilder entstehen Kosten zwischen 5-10 cent mit Bilder zwischen 20-30 cent.")
+        form_layout.addRow("Optionen:", self.generate_images_checkbox)
 
         root_layout.addLayout(form_layout)
 
@@ -1203,7 +1326,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
 
         self.worker_thread = QThread(self)
-        self.worker = ResearchWorker(api_key)
+        self.worker = ResearchWorker(api_key, self.generate_images_checkbox.isChecked())
         self.worker.moveToThread(self.worker_thread)
 
         self.worker_thread.started.connect(self.worker.run)
@@ -1220,6 +1343,7 @@ class MainWindow(QMainWindow):
 
     def set_status(self, status_text):
         self.status_label.setText(status_text)
+        log_to_file(status_text, "INFO")
 
     def set_active_agent(self, status_text):
         self.active_agent_label.setText(status_text)
@@ -1227,10 +1351,12 @@ class MainWindow(QMainWindow):
     def show_result(self, result_text, pdf_path):
         self.result_text.setPlainText(result_text)
         self.result_text.append(f"\n\nPDF gespeichert unter: {pdf_path}")
+        log_to_file(f"Recherche erfolgreich abgeschlossen, PDF: {pdf_path}", "INFO")
 
     def show_error(self, error_text):
         self.set_status("Fehler bei der Recherche")
         self.result_text.setPlainText(error_text)
+        log_to_file(error_text, "ERROR")
 
     def on_worker_finished(self):
         self.start_button.setEnabled(True)

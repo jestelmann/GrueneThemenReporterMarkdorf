@@ -26,7 +26,7 @@ coverage
 pytest_cache/
 # IDE-spezifische Dateien (z. B. PyCharm, VSCode)
 idea/
-report/
+reports/
 vscode/
 # Sonstiges
 *.mo
