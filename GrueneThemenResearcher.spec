@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
+
+datas = [('assets/gruene_icon.svg', 'assets')]
+datas += collect_data_files('crewai')
 
 
 a = Analysis(
     ['GrueneThemenResearcher.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets/gruene_icon.svg', 'assets')],
+    datas=datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

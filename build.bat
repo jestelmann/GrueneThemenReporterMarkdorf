@@ -36,6 +36,7 @@ echo [INFO] Starte EXE-Build...
   --onefile ^
   --name GrueneThemenResearcher ^
   --exclude-module PyQt5 ^
+  --collect-data crewai ^
   --add-data "assets/gruene_icon.svg;assets" ^
   GrueneThemenResearcher.py
 
