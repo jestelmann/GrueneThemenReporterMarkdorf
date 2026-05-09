@@ -1,0 +1,32 @@
+# Byte-kompilierte Dateien
+__pycache__/
+*.py[cod]
+*$py.class
+# C-Erweiterungen
+*.so
+# Distribution / Packaging
+Python
+build/
+dist/
+*.egg-info/
+eggs/
+# Logs und Datenbanken
+*.log
+*.sqlite3
+# Virtuelle Umgebungen
+env/
+venv/
+ENV/
+venv/
+# Jupyter Notebook Checkpoints
+ipynb_checkpoints/
+# Test- und Coverage-Berichte
+tox/
+coverage
+pytest_cache/
+# IDE-spezifische Dateien (z. B. PyCharm, VSCode)
+idea/
+vscode/
+# Sonstiges
+*.mo
+*.pot
