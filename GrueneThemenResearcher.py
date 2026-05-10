@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 import io
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -138,8 +139,18 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    images_path = output_path / "images"
+    images_path.mkdir(parents=True, exist_ok=True)
+
+    report_title = "Gruene Themen Report"
+    report_subtitle = "Ortsverband Markdorf und Umland"
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    pdf_path = output_path / f"finaler_report_{timestamp}.pdf"
+    report_slug = re.sub(r"[^a-z0-9]+", "_", report_title.lower()).strip("_") or "gruene_report"
+    report_basename = f"{report_slug}_{timestamp}"
+    pdf_path = output_path / f"{report_basename}.pdf"
+    md_path = output_path / f"{report_basename}.md"
 
     pdf = canvas.Canvas(str(pdf_path), pagesize=A4)
     page_width, page_height = A4
@@ -149,13 +160,46 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
     bottom_margin = 52
     content_width = page_width - left_margin - right_margin
 
-    report_title = "Gruene Themen Report"
-    report_subtitle = "Ortsverband Markdorf und Umland"
-    created_at = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     page_number = 1
     y = top_margin
     temp_image_paths = []
     image_cache = {}
+    saved_report_images = {}
+    image_counter = 0
+
+    def save_persistent_image(source_path, section_index=None):
+        nonlocal image_counter
+        if not source_path:
+            return None
+
+        source_path = Path(source_path)
+        if not source_path.exists():
+            return None
+
+        key = str(source_path.resolve())
+        if key in saved_report_images:
+            return saved_report_images[key]
+
+        image_counter += 1
+        suffix = source_path.suffix.lower() or ".png"
+        section_tag = f"section{section_index + 1}_" if section_index is not None else ""
+        target_filename = f"{report_basename}_{section_tag}image_{image_counter:02d}{suffix}"
+        target_path = images_path / target_filename
+
+        if source_path.resolve() == target_path.resolve():
+            saved_report_images[key] = target_path
+            return target_path
+
+        try:
+            shutil.copy2(str(source_path), str(target_path))
+        except Exception:
+            try:
+                target_path.write_bytes(source_path.read_bytes())
+            except Exception:
+                return None
+
+        saved_report_images[key] = target_path
+        return target_path
 
     def find_local_layout_images():
         image_dir = Path(__file__).resolve().parent / "assets"
@@ -814,6 +858,8 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
             wrapped_lines.extend(wrap(paragraph.strip(), width=94))
 
         image_path, image_caption = resolve_image_for_section(section, idx, generate_images)
+        if image_path:
+            image_path = save_persistent_image(image_path, idx) or image_path
         has_signal = section.get("image_signal") is not None
         heading_lower_img = str(section.get("heading", "")).lower()
         is_messenger_section = heading_lower_img in {"messenger"}
@@ -897,13 +943,23 @@ def export_report_to_pdf(report_text, output_dir="reports", api_key=None, status
 
     pdf.save()
 
+    markdown_lines = [str(report_text).strip(), "", "## Eingesetzte Bilder", ""]
+    for image_path in saved_report_images.values():
+        rel_path = Path("images") / image_path.name
+        markdown_lines.append(f"- ![{image_path.stem}]({rel_path.as_posix()})")
+    markdown_lines.append("")
+    try:
+        md_path.write_text("\n".join(markdown_lines), encoding="utf-8")
+    except Exception:
+        pass
+
     for temp_path in temp_image_paths:
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
             pass
 
-    return pdf_path
+    return pdf_path, md_path
 
 def build_markdorf_pr_crew(api_key):
     flash_model = os.getenv("GEMINI_FLASH_MODEL", "gemini/gemini-2.5-flash")
@@ -1168,7 +1224,7 @@ def run_research(api_key, status_callback=None, generate_images=True):
     if status_callback:
         status_callback("Erstelle PDF-Report...")
     log_to_file("Erstelle PDF-Report...", "INFO")
-    pdf_path = export_report_to_pdf(final_report, api_key=clean_api_key, status_callback=status_callback, generate_images=generate_images)
+    pdf_path, md_path = export_report_to_pdf(final_report, api_key=clean_api_key, status_callback=status_callback, generate_images=generate_images)
 
     try:
         if os.name == "nt":
@@ -1181,7 +1237,7 @@ def run_research(api_key, status_callback=None, generate_images=True):
 
     if status_callback:
         status_callback("Recherche abgeschlossen.")
-    return str(final_report), str(pdf_path)
+    return str(final_report), str(pdf_path), str(md_path)
 
 
 def get_app_icon_path():
@@ -1195,7 +1251,7 @@ def get_app_icon_path():
 class ResearchWorker(QObject):
     status_changed = Signal(str)
     agent_changed = Signal(str)
-    result_ready = Signal(str, str)
+    result_ready = Signal(str, str, str)
     error_occurred = Signal(str)
     finished = Signal()
 
@@ -1251,8 +1307,8 @@ class ResearchWorker(QObject):
             stdout_tee = _LogTee(sys.stdout, self._handle_runtime_log_line)
             stderr_tee = _LogTee(sys.stderr, self._handle_runtime_log_line)
             with contextlib.redirect_stdout(stdout_tee), contextlib.redirect_stderr(stderr_tee):
-                result, pdf_path = run_research(self.api_key, self.status_changed.emit, self.generate_images)
-            self.result_ready.emit(result, pdf_path)
+                result, pdf_path, md_path = run_research(self.api_key, self.status_changed.emit, self.generate_images)
+            self.result_ready.emit(result, pdf_path, md_path)
         except Exception as exc:
             error_text = f"{exc}\n\n{traceback.format_exc()}"
             log_to_file(error_text, "ERROR")
@@ -1348,10 +1404,11 @@ class MainWindow(QMainWindow):
     def set_active_agent(self, status_text):
         self.active_agent_label.setText(status_text)
 
-    def show_result(self, result_text, pdf_path):
+    def show_result(self, result_text, pdf_path, md_path):
         self.result_text.setPlainText(result_text)
         self.result_text.append(f"\n\nPDF gespeichert unter: {pdf_path}")
-        log_to_file(f"Recherche erfolgreich abgeschlossen, PDF: {pdf_path}", "INFO")
+        self.result_text.append(f"Markdown gespeichert unter: {md_path}")
+        log_to_file(f"Recherche erfolgreich abgeschlossen, PDF: {pdf_path}, Markdown: {md_path}", "INFO")
 
     def show_error(self, error_text):
         self.set_status("Fehler bei der Recherche")
