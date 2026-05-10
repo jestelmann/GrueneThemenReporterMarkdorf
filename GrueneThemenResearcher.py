@@ -1,20 +1,12 @@
 import os
-import base64
 import contextlib
 import importlib.util
-import io
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import traceback
-from http.client import InvalidURL
 from datetime import datetime
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
-from urllib.request import urlretrieve
 from textwrap import wrap
 
 APP_VERSION_MAJOR = 0
@@ -25,6 +17,10 @@ LOG_FILE_NAME = "error.log"
 
 
 def get_app_version():
+    """
+    Gibt die aktuelle App-Version basierend auf Git-Commits zurück.
+    Falls kein Git-Repository vorhanden ist, wird eine Fallback-Version verwendet.
+    """
     try:
         base_path = Path(__file__).resolve().parent
         if not (base_path / ".git").exists():
@@ -43,10 +39,16 @@ def get_app_version():
 
 
 def get_log_file_path():
+    """
+    Gibt den Pfad zur Log-Datei zurück.
+    """
     return Path(__file__).resolve().parent / LOG_FILE_NAME
 
 
 def log_to_file(message, level="INFO"):
+    """
+    Loggt eine Nachricht mit Zeitstempel und Level in die Log-Datei.
+    """
     try:
         log_path = get_log_file_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,14 +67,23 @@ except ImportError:
 
 
 def _is_module_available(module_name):
+    """
+    Prüft, ob ein Python-Modul verfügbar ist.
+    """
     return importlib.util.find_spec(module_name) is not None
 
 
 def _install_package(package_name):
+    """
+    Installiert ein Paket mit pip.
+    """
     subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
 
 
 def ensure_dependencies_installed():
+    """
+    Stellt sicher, dass alle erforderlichen Abhängigkeiten installiert sind.
+    """
     required_modules = {
         "crewai": "crewai",
         "google.genai": "google-genai",
@@ -102,7 +113,6 @@ try:
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import (
         QApplication,
-        QCheckBox,
         QFormLayout,
         QLabel,
         QLineEdit,
@@ -118,7 +128,6 @@ except ImportError:
     from PyQt5.QtGui import QIcon
     from PyQt5.QtWidgets import (
         QApplication,
-        QCheckBox,
         QFormLayout,
         QLabel,
         QLineEdit,
@@ -131,7 +140,10 @@ except ImportError:
     )
 
 
-def export_report_to_pdf(report_text, output_dir='reports', api_key=None, status_callback=None, generate_images=True):
+def export_report_to_markdown(report_text, output_dir='reports', status_callback=None):
+    """
+    Exportiert den Report als Markdown-Datei in das angegebene Verzeichnis.
+    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -149,9 +161,20 @@ def export_report_to_pdf(report_text, output_dir='reports', api_key=None, status
     except Exception:
         pass
 
-    return None, md_path
+    return md_path
+
+
+def create_task(description, expected_output, agent, context=None):
+    """
+    Erstellt eine Task für einen Agenten mit Beschreibung, erwartetem Output und optionalem Kontext.
+    """
+    return Task(description=description, expected_output=expected_output, agent=agent, context=context or [])
+
 
 def build_markdorf_pr_crew(api_key):
+    """
+    Erstellt und konfiguriert die Crew von Agenten für die Recherche und Erstellung des Reports.
+    """
     flash_model = os.getenv("GEMINI_FLASH_MODEL", "gemini/gemini-2.5-flash")
     pro_model = os.getenv("GEMINI_PRO_MODEL", "gemini/gemini-2.5-flash")
 
@@ -201,7 +224,7 @@ def build_markdorf_pr_crew(api_key):
 
     layouter = Agent(
         role="Layouter fuer Gruene Markdorf",
-        goal="Erzeuge aus dem finalen Report ein modernes, visuell klares PDF-Layout mit sinnvollen Bildhinweisen.",
+        goal="Erzeuge aus dem finalen Report ein modernes, visuell klares Markdown-Layout mit sinnvollen Bildhinweisen.",
         backstory="""Du bist Art Director fuer politische Kommunikation. Du strukturierst Inhalte lesefreundlich,
     definierst klare Abschnittstitel und gibst gezielte Bildhinweise fuer lokale, nachhaltige und gruene Themen.
     Dein Stil wirkt modern, ruhig und glaubwuerdig fuer den Ortsverband Markdorf und Umland.""",
@@ -209,20 +232,20 @@ def build_markdorf_pr_crew(api_key):
         verbose=True,
     )
 
-    task_research = Task(
+    task_research = create_task(
         description="Recherchiere 3 aktuelle kommunalpolitische Themen in Markdorf und Umland (Woche: Mai 2026). Stelle sicher, dass jedes Thema klar voneinander abgrenzbar und lokal relevant ist.",
         expected_output="Eine Liste mit 3 News-Themen inkl. Quellenangabe oder kurzer Zusammenfassung, getrennt nach Thema.",
         agent=researcher,
     )
 
-    task_background = Task(
+    task_background = create_task(
         description="Vertiefe jedes der 3 recherchierten Themen und ergänze sie um grüne Hintergründe, Argumente und klare Relevanz für Markdorf und Umland.",
         expected_output="Ein inhaltliches Briefing zu den 3 Themen mit Fakten-Check, grünem Bezug und jeweils einem kurzen Fokusargument.",
         agent=expert,
         context=[task_research],
     )
 
-    task_creation = Task(
+    task_creation = create_task(
         description="""Erstelle auf Basis des Briefings zu den 3 Themen für jedes Thema je einen Instagram-, Facebook-, Website- und Messenger-Beitrag.
     Gliedere die Ausgabe in Kapitel: THEMA 1, THEMA 2, THEMA 3.
     Passe Ton, Länge und Call-to-Action an den jeweiligen Kanal an.""",
@@ -250,7 +273,7 @@ def build_markdorf_pr_crew(api_key):
         context=[task_background],
     )
 
-    task_compliance = Task(
+    task_compliance = create_task(
         description="""Überprüfe alle vier Entwürfe auf Konformität (Bund, Land BW, Kreis).
     Schreibe die Texte bei Bedarf direkt um, um sie strategisch und kanalgerecht zu optimieren.
     Erstelle am Ende eine kurze Liste deiner Änderungen mit Begründung.""",
@@ -275,8 +298,8 @@ def build_markdorf_pr_crew(api_key):
         context=[task_creation],
     )
 
-    task_layout = Task(
-        description="""Layoutiere den finalen Report fuer den PDF-Export in einem modernen Stil passend zu Gruene Markdorf.
+    task_layout = create_task(
+        description="""Layoutiere den finalen Report fuer einen modernen Markdown-Report in einem klaren Stil passend zu Gruene Markdorf.
     Erzeuge den finalen Report mit Inhaltsverzeichnis und drei Kapiteln, eines pro Thema.
     Jedes Kapitel soll das Thema beschreiben, den grünen Hintergrund erklären und die vier Kanal-Posts enthalten.
     Erstelle pro Kapitel je einen Instagram-, Facebook-, Website- und Messenger-Text.
@@ -321,6 +344,9 @@ def build_markdorf_pr_crew(api_key):
 
 
 def refine_report_with_gemini_designer(raw_report, api_key):
+    """
+    Verfeinert den Roh-Report mit Gemini Designer für eine professionelle Markdown-Ausgabe.
+    """
     if not api_key or genai is None:
         return str(raw_report)
 
@@ -328,7 +354,7 @@ def refine_report_with_gemini_designer(raw_report, api_key):
     source_text = str(raw_report)
 
     prompt = f"""Du bist ein Premium-Redaktionsdesigner wie im Gemini-Webinterface.
-Erstelle aus dem folgenden Roh-Report eine druckreife Endfassung fuer ein modernes PDF.
+Erstelle aus dem folgenden Roh-Report eine druckreife Endfassung fuer einen modernen Markdown-Report.
 
 Wichtige Regeln:
 - Gib nur den finalen Inhalt aus, keine Erklaerungen.
@@ -388,10 +414,13 @@ Roh-Report:
     return str(raw_report)
 
 
-def run_research(api_key, status_callback=None, generate_images=True):
+def run_research(api_key, status_callback=None):
+    """
+    Führt die komplette Recherche durch: Agenten initialisieren, Crew starten, Report verfeinern und als Markdown exportieren.
+    """
     if not api_key or not api_key.strip():
         log_to_file("Fehler: API-Key fehlt bei Aufruf von run_research.", "ERROR")
-        raise ValueError("Bitte gib einen API-Key ein.")
+        raise ValueError("Bitte gib zuerst einen API-Key ein.")
 
     clean_api_key = api_key.strip()
     log_to_file("Starte run_research.", "INFO")
@@ -414,14 +443,17 @@ def run_research(api_key, status_callback=None, generate_images=True):
     if status_callback:
         status_callback("Erstelle Markdown-Report...")
     log_to_file("Erstelle Markdown-Report...", "INFO")
-    pdf_path, md_path = export_report_to_pdf(final_report, api_key=clean_api_key, status_callback=status_callback, generate_images=generate_images)
+    md_path = export_report_to_markdown(final_report, status_callback=status_callback)
 
     if status_callback:
         status_callback("Recherche abgeschlossen.")
-    return str(final_report), "", str(md_path)
+    return str(final_report), str(md_path)
 
 
 def get_app_icon_path():
+    """
+    Gibt den Pfad zum App-Icon zurück, abhängig davon, ob die App eingefroren ist oder nicht.
+    """
     if getattr(sys, "frozen", False):
         base_path = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
     else:
@@ -432,17 +464,22 @@ def get_app_icon_path():
 class ResearchWorker(QObject):
     status_changed = Signal(str)
     agent_changed = Signal(str)
-    result_ready = Signal(str, str, str)
+    result_ready = Signal(str, str)
     error_occurred = Signal(str)
     finished = Signal()
 
-    def __init__(self, api_key, generate_images=True):
+    def __init__(self, api_key):
+        """
+        Initialisiert den ResearchWorker mit dem API-Key.
+        """
         super().__init__()
         self.api_key = api_key
-        self.generate_images = generate_images
         self._last_agent_status = ""
 
     def _status_from_log_line(self, line):
+        """
+        Extrahiert den Agenten-Status aus einer Log-Zeile.
+        """
         line_lower = line.lower()
         agent_markers = [
             ("lokal-researcher markdorf und umland", "Lokal-Researcher"),
@@ -458,12 +495,18 @@ class ResearchWorker(QObject):
         return None
 
     def _handle_runtime_log_line(self, line):
+        """
+        Verarbeitet eine Log-Zeile zur Laufzeit und emittiert Agenten-Status-Änderungen.
+        """
         status_text = self._status_from_log_line(line)
         if status_text and status_text != self._last_agent_status:
             self._last_agent_status = status_text
             self.agent_changed.emit(status_text)
 
     def run(self):
+        """
+        Führt die Recherche in einem separaten Thread aus und emittiert Signale für Status und Ergebnisse.
+        """
         class _LogTee:
             def __init__(self, original_stream, line_callback):
                 self.original_stream = original_stream
@@ -488,8 +531,8 @@ class ResearchWorker(QObject):
             stdout_tee = _LogTee(sys.stdout, self._handle_runtime_log_line)
             stderr_tee = _LogTee(sys.stderr, self._handle_runtime_log_line)
             with contextlib.redirect_stdout(stdout_tee), contextlib.redirect_stderr(stderr_tee):
-                result, pdf_path, md_path = run_research(self.api_key, self.status_changed.emit, self.generate_images)
-            self.result_ready.emit(result, pdf_path, md_path)
+                result, md_path = run_research(self.api_key, self.status_changed.emit)
+            self.result_ready.emit(result, md_path)
         except Exception as exc:
             error_text = f"{exc}\n\n{traceback.format_exc()}"
             log_to_file(error_text, "ERROR")
@@ -501,6 +544,9 @@ class ResearchWorker(QObject):
 
 class MainWindow(QMainWindow):
     def __init__(self):
+        """
+        Initialisiert das Hauptfenster der Anwendung mit UI-Elementen.
+        """
         super().__init__()
         self.setWindowTitle(f"Gruene Themen Researcher - Ortsverband Markdorf und Umland v{get_app_version()}")
         icon_path = get_app_icon_path()
@@ -536,11 +582,6 @@ class MainWindow(QMainWindow):
         self.active_agent_label = QLabel("Aktiver Agent: -")
         form_layout.addRow("Agent:", self.active_agent_label)
 
-        self.generate_images_checkbox = QCheckBox("Bilder generieren")
-        self.generate_images_checkbox.setChecked(True)
-        self.generate_images_checkbox.setToolTip("Ohne Bilder entstehen Kosten zwischen 5-10 cent mit Bilder zwischen 20-30 cent.")
-        form_layout.addRow("Optionen:", self.generate_images_checkbox)
-
         root_layout.addLayout(form_layout)
 
         self.start_button = QPushButton("Recherche starten")
@@ -553,6 +594,9 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.result_text)
 
     def start_research(self):
+        """
+        Startet die Recherche in einem separaten Thread und verbindet die Signale.
+        """
         api_key = self.api_key_input.text().strip()
         if not api_key:
             QMessageBox.warning(self, "API-Key fehlt", "Bitte gib zuerst einen API-Key ein.")
@@ -563,7 +607,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
 
         self.worker_thread = QThread(self)
-        self.worker = ResearchWorker(api_key, self.generate_images_checkbox.isChecked())
+        self.worker = ResearchWorker(api_key)
         self.worker.moveToThread(self.worker_thread)
 
         self.worker_thread.started.connect(self.worker.run)
@@ -579,23 +623,38 @@ class MainWindow(QMainWindow):
         self.worker_thread.start()
 
     def set_status(self, status_text):
+        """
+        Setzt den Status-Text im UI und loggt ihn.
+        """
         self.status_label.setText(status_text)
         log_to_file(status_text, "INFO")
 
     def set_active_agent(self, status_text):
+        """
+        Setzt den Text für den aktiven Agenten im UI.
+        """
         self.active_agent_label.setText(status_text)
 
-    def show_result(self, result_text, pdf_path, md_path):
+    def show_result(self, result_text, md_path):
+        """
+        Zeigt das Ergebnis der Recherche im UI an und loggt den Erfolg.
+        """
         self.result_text.setPlainText(result_text)
         self.result_text.append(f"\n\nMarkdown gespeichert unter: {md_path}")
         log_to_file(f"Recherche erfolgreich abgeschlossen, Markdown: {md_path}", "INFO")
 
     def show_error(self, error_text):
+        """
+        Zeigt einen Fehler im UI an und loggt ihn.
+        """
         self.set_status("Fehler bei der Recherche")
         self.result_text.setPlainText(error_text)
         log_to_file(error_text, "ERROR")
 
     def on_worker_finished(self):
+        """
+        Wird aufgerufen, wenn der Worker-Thread beendet ist, und bereinigt Ressourcen.
+        """
         self.start_button.setEnabled(True)
         self.set_active_agent("Aktiver Agent: -")
         self.worker = None
@@ -603,6 +662,9 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    """
+    Startet die Qt-Anwendung und zeigt das Hauptfenster an.
+    """
     app = QApplication([])
     icon_path = get_app_icon_path()
     if icon_path.exists():
