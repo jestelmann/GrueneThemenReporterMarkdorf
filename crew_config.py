@@ -14,7 +14,7 @@ def build_markdorf_pr_crew(api_key):
     Erstellt und konfiguriert die Crew von Agenten für die Recherche und Erstellung des Reports.
     """
     flash_model = os.getenv("GEMINI_FLASH_MODEL", "gemini/gemini-2.5-flash")
-    pro_model = os.getenv("GEMINI_PRO_MODEL", "gemini/gemini-2.5-flash")
+    pro_model = os.getenv("GEMINI_PRO_MODEL", "gemini/gemini-2.5-pro")
 
     gemini_flash = LLM(model=flash_model, api_key=api_key, temperature=0.7)
     gemini_pro = LLM(model=pro_model, api_key=api_key, temperature=0.3)
