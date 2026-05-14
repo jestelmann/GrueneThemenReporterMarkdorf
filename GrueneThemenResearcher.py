@@ -18,7 +18,9 @@ LOG_FILE_NAME = "error.log"
 
 def get_app_version():
     """
-    Gibt die aktuelle App-Version basierend auf Git-Commits zurück.
+    Gibt die aktuelle App-Version basierend auf Git-Tags und Commits zurück.
+    Falls Git-Tags vorhanden sind, werden die Major und Minor Versionsnummern von dort extrahiert.
+    Die Patch-Nummer wird basierend auf Commits berechnet.
     Falls kein Git-Repository vorhanden ist, wird eine Fallback-Version verwendet.
     """
     try:
@@ -26,6 +28,28 @@ def get_app_version():
         if not (base_path / ".git").exists():
             return APP_VERSION_FALLBACK
 
+        major = APP_VERSION_MAJOR
+        minor = APP_VERSION_MINOR
+        
+        # Versuche, den neuesten Git Tag zu finden
+        try:
+            latest_tag = subprocess.check_output(
+                ["git", "describe", "--tags", "--abbrev=0"],
+                cwd=base_path,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            
+            # Extrahiere Major und Minor aus dem Tag (Formate: v1.2.3, v1.2, 1.2.3, 1.2)
+            tag_match = re.match(r'v?(\d+)\.(\d+)', latest_tag)
+            if tag_match:
+                major = int(tag_match.group(1))
+                minor = int(tag_match.group(2))
+        except subprocess.CalledProcessError:
+            # Keine Tags vorhanden, verwende Standard-Fallbacks
+            pass
+
+        # Berechne Patch-Nummer basierend auf Commits
         commit_count = subprocess.check_output(
             ["git", "rev-list", "--count", "HEAD"],
             cwd=base_path,
@@ -33,7 +57,7 @@ def get_app_version():
             text=True,
         ).strip()
         patch = APP_VERSION_PATCH_BASE + int(commit_count)
-        return f"{APP_VERSION_MAJOR}.{APP_VERSION_MINOR}.{patch}"
+        return f"{major}.{minor}.{patch}"
     except Exception:
         return APP_VERSION_FALLBACK
 
